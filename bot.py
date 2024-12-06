@@ -3,6 +3,7 @@
 import os
 os.chdir(os.path.dirname(os.path.realpath(__file__)))
 import telebot
+from telebot import apihelper
 import re
 import argparse
 import logger
@@ -10,12 +11,13 @@ import requests.exceptions
 from ASFConnector import ASFConnector
 
 
-_REGEX_CDKEY = re.compile('\w{5}-\w{5}-\w{5}')
-_REGEX_COMMAND_BOT_ARGS = '^[/!]\w+\s*(?P<bot>\w+)?\s+(?P<arg>.*)'
-_REGEX_COMMAND_RAW = '^[/!](?P<input>(?P<command>\w+).*)'
-_REGEX_COMMAND = '^[/!]\w+\s*(?P<bot>\w+)?'
+_REGEX_CDKEY = re.compile(r'\w{5}-\w{5}-\w{5}')
+_REGEX_COMMAND_BOT_ARGS = r'^[/!]\w+\s*(?P<bot>\w+)?\s+(?P<arg>.*)'
+_REGEX_COMMAND_RAW = r'^[/!](?P<input>(?P<command>\w+).*)'
+_REGEX_COMMAND = r'^[/!]\w+\s*(?P<bot>\w+)?'
 _ENV_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
 _ENV_TELEGRAM_USER_ALIAS = "TELEGRAM_USER_ALIAS"
+_ENV_TELEGRAM_PROXY = "TELEGRAM_PROXY"
 _ENV_ASF_IPC_HOST = "ASF_IPC_HOST"
 _ENV_ASF_IPC_PORT = "ASF_IPC_PORT"
 _ENV_ASF_IPC_PASSWORD = "ASF_IPC_PASSWORD"
@@ -31,6 +33,9 @@ parser.add_argument("--port", help="ASF IPC port. Default: 1242", default='1242'
 parser.add_argument("--password", help="ASF IPC password.", default=None)
 parser.add_argument("--token", type=str,
                     help="Telegram API token given by @botfather.", default=None)
+parser.add_argument("--proxy", help="Use a proxy to connect to Telegram. Format: "
+                                    "<protocol>://<host>:<port>. For example: http://192.168.1.1:7890"
+                    , default=None)
 parser.add_argument("--alias", type=str, help="Telegram alias of the bot owner.", default=None)
 args = parser.parse_args()
 
@@ -42,7 +47,8 @@ try:
 except KeyError as key_error:
     if not args.token:
         LOG.critical(
-            "No telegram bot token provided. Please do so using --token argument or %s environment variable.", _ENV_TELEGRAM_BOT_TOKEN)
+            "No telegram bot token provided. Please do so using --token argument or %s environment variable.",
+            _ENV_TELEGRAM_BOT_TOKEN)
         exit(1)
 
 try:
@@ -50,8 +56,13 @@ try:
 except KeyError as key_error:
     if not args.alias:
         LOG.critical(
-            "No telegram user alias provided. Please do so using --alias argument or %s environment variable.", _ENV_TELEGRAM_USER_ALIAS)
+            "No telegram user alias provided. Please do so using --alias argument or %s environment variable.",
+            _ENV_TELEGRAM_USER_ALIAS)
         exit(1)
+try:
+    args.proxy = os.environ[_ENV_TELEGRAM_PROXY]
+except KeyError as key_error:
+    pass
 
 # ASF IPC related environment variables.
 try:
@@ -69,19 +80,19 @@ except KeyError as key_error:
         LOG.debug("No IPC Password provided.")
     pass
 
-# Sanitize input
-if args.alias[0] == '@':
-    args.alias = args.alias[1:]
-
 args.token = args.token.strip()
-args.alias = args.alias.strip()
+args.alias = [alias.replace('@', '').strip() for alias in args.alias.split(',')]
 args.host = args.host.strip()
 args.port = args.port.strip()
 if args.password:
     args.password = args.password.strip()
 
+if args.proxy:
+    args.proxy = args.proxy.strip()
+
 LOG.info("Starting up bot...")
 LOG.debug("Telegram token: %s", args.token)
+LOG.debug("Telegram Proxy %s", args.proxy)
 LOG.debug("User alias: %s", args.alias)
 LOG.debug("ASF IPC host: %s", args.host)
 LOG.debug("ASF IPC port: %s", args.port)
@@ -95,9 +106,17 @@ try:
         LOG.warning('ASF Instance message was unsuccesful. %s', str(asf_info))
 
 except Exception as e:
-    LOG.critical("Couldn't communicate with ASF. Host: '%s' Port: '%s' \n %s",
-                 args.host, args.port, str(e))
-    exit(1)
+    LOG.error("Couldn't communicate with ASF. Host: '%s' Port: '%s' \n %s",
+              args.host, args.port, str(e))
+    
+if args.proxy and args.proxy != '' and '://' in args.proxy:
+    protocol, url = args.proxy.split('://', 1)
+    apihelper.proxy = {
+        protocol: url
+    }
+    LOG.info(f"Using proxy to connect to Telegram: {protocol}://{apihelper.proxy[protocol]}")
+elif args.proxy and args.proxy != '' and '://' not in args.proxy:
+    LOG.error(f"Invalid proxy provided: {args.proxy}. Skipping...")
 
 bot = telebot.TeleBot(args.token)
 
@@ -105,20 +124,33 @@ bot = telebot.TeleBot(args.token)
 def is_user_message(message):
     """ Returns if a message is from the owner of the bot comparing it to the user alias provided on startup. """
     username = message.chat.username
-    return username == args.alias
+    return username in args.alias
 
 
 @bot.message_handler(func=is_user_message, commands=['status'])
 def status_command(message):
     LOG.debug("Received status message: %s", str(message))
-    match = re.search(_REGEX_COMMAND, message.text)
-    if not match:
-        reply_to(message, "Invalid command. Usage:\n<code>/status &lt;bot&gt;</code>")
-        return
-    bot_arg = match.group('bot') if match.group('bot') else 'ASF'
-    response = asf_connector.get_bot_info(bot_arg)
-    LOG.info("Response to status message: %s", str(response))
-    reply_to(message, "<code>" + str(response) + "</code>")
+    try:
+        match = re.search(_REGEX_COMMAND, message.text)
+        if not match:
+            reply_to(message, "Invalid command. Usage:\n<code>/status &lt;bot&gt;</code>")
+            return
+        bot_arg = match.group('bot') if match.group('bot') else 'ASF'
+        response = asf_connector.get_bot_info(bot_arg)
+        LOG.info("Response to status message: %s", str(response))
+        reply_to(message, "<code>" + str(response) + "</code>")
+    except requests.HTTPError as http_error:
+        LOG.exception(http_error)
+        response = http_error.response
+        status_code = response.status_code
+    except requests.ConnectionError as connection_error:
+        LOG.exception(connection_error)
+        error_message = str(connection_error.args[0].reason.args[0]).split('>:')[1]
+        error_response = "Couldn't reach the ASF instance: <code>{}</code>".format(error_message)
+        reply_to(message, error_response)
+    except Exception as ex:
+        reply_to(message, "There was an unexpected error. Please check the logs for more info.")
+        LOG.exception(ex)
 
 
 @bot.message_handler(commands=['redeem'])
@@ -171,7 +203,9 @@ def check_for_cdkeys(message):
                   message.text, message.chat.username)
 
 
-def reply_to(message, text, **kwargs):
+def reply_to(message, text, sanitize=False, **kwargs):
+    if sanitize:
+        text = replace_html_entities(text)
     try:
         bot.reply_to(message, text, parse_mode="html", **kwargs)
     except Exception as ex:
@@ -186,8 +220,10 @@ def replace_html_entities(message: str):
 
 try:
     LOG.debug("Polling started")
-    bot.polling(none_stop=True)
+    bot.infinity_polling()
+except KeyboardInterrupt:
+    LOG.info("Exiting...")
+    exit(0)
 except Exception as e:
     LOG.exception(e)
-    LOG.critical(str(e))
 

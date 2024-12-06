@@ -30,7 +30,7 @@ class ASFConnector:
         LOG.debug('get_bot_info: bot {}'.format(bot))
         resource = '/Bot/' + bot
         response = self.connection_handler.get(resource)
-        if response['Result']:
+        if 'Result' in response:
             message = ""
             for bot_name in response['Result']:
                 message += 'Bot {}: '.format(bot_name)
@@ -84,29 +84,36 @@ class ASFConnector:
                 payload_keys.append(key)
         data = {'KeysToRedeem': payload_keys}
         response = self.connection_handler.post(resource, payload=data)
-        if response['Result']:
+        if 'Result' in response:
             results = response['Result']
             message = ""
             for bot_name in results:
-                message += "Bot {}: \n".format(bot_name)
                 bot = results[bot_name]
                 for key in bot:
                     if bot[key]:
-                        if bot[key]['Items']:
+                        message += "Bot {}: \n".format(bot_name)
+                        if 'purchase_receipt_info' in bot[key] and bot[key]['purchase_receipt_info']:
+                            purchase_receipt_info = bot[key]['purchase_receipt_info']
                             items = ''
-                            for item in bot[key]['Items']:
-                                items += '[{}, {}] '.format(item, bot[key]['Items'][item])
-                            message += "\t[{}] {}:{}/{}\n".format(
-                                key, items, bot[key]['Result'] if type(bot[key]['Result']) is str
-                                else Result[bot[key]['Result']],
-                                bot[key]['PurchaseResultDetail'] if type(bot[key]['PurchaseResultDetail']) is str
-                                else PurchaseResultDetail[bot[key]['PurchaseResultDetail']])
+                            # Parse items in the key
+                            for item in purchase_receipt_info['line_items']:
+                                items += '[{}, {}] '.format(item['packageid'], item['line_item_description'])
+                            # Build message with the receipt info and the items
+                            message += "\t[{}] {}: {}/{}\n".format(
+                                key, items, purchase_receipt_info['purchase_status']
+                                if type(purchase_receipt_info['purchase_status']) is str
+                                else Result[purchase_receipt_info['purchase_status']],
+                                purchase_receipt_info['result_detail'] if type(purchase_receipt_info['result_detail']) is str
+                                else PurchaseResultDetail[purchase_receipt_info['result_detail']])
                         else:
                             message += "\t[{}] {}/{}\n".format(
                                 key, bot[key]['Result'] if type(bot[key]['Result']) is str
                                 else Result[bot[key]['Result']],
                                 bot[key]['PurchaseResultDetail'] if type(bot[key]['PurchaseResultDetail']) is str
                                 else PurchaseResultDetail[bot[key]['PurchaseResultDetail']])
+
+        elif response['Success']:
+            message = 'Bot {} not found.'.format(bot)
         else:
             message = 'Redeem failed: {}'.format(response['Message'])
         return message
